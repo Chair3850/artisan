@@ -1456,6 +1456,7 @@ class ApplicationWindow(QMainWindow):
     updateScheduleSignal = pyqtSignal()
     disconnectPlusSignal = pyqtSignal() # connected/disconnected in plus/scheduler.py
     setTimerColorSignal = pyqtSignal(str)
+    updateSinceDropLCDSignal = pyqtSignal() # triggers a refresh of the 'since DROP' (between batch) LCD
 
     __slots__ = [ 'locale_str', 'app', 'superusermode', 'sample_loop_running', 'time_stopped', 'plus_account', 'plus_account_id', 'plus_remember_credentials', 'plus_email', 'plus_language', 'plus_subscription', 'percent_decimals',
         'plus_paidUntil', 'plus_rlimit', 'plus_used', 'plus_readonly', 'plus_user_id', 'appearance', 'mpl_fontproperties', 'full_screen_mode_active', 'processingKeyEvent', 'quickEventShortCut',
@@ -1502,6 +1503,7 @@ class ApplicationWindow(QMainWindow):
         'buttonONOFF', 'buttonSTARTSTOP', 'buttonFCs', 'buttonFCe', 'buttonSCs', 'buttonSCe', 'buttonRESET', 'buttonCHARGE', 'buttonDROP',
         'buttonCONTROL', 'buttonEVENT', 'buttonSVp5', 'buttonSVp10', 'buttonSVp20', 'buttonSVm20', 'buttonSVm10', 'buttonSVm5', 'buttonDRY',
         'buttonCOOL', 'lcd1', 'lcd2', 'lcd3', 'lcd4', 'lcd5',
+        'sinceDropLabel', 'sinceDropLcd', 'sinceDropLcdFrame', 'sinceDropLCD', 'sinceDropLCDflag', 'sinceDropTimer', 'sinceDropAction',
         'lcd6', 'lcd7', 'label2', 'label3', 'label4', 'label5', 'label6', 'label7', 'extraLCD1', 'extraLCD2', 'extraLCDlabel1', 'extraLCDlabel2',
         'extraLCDframe1', 'extraLCDframe2', 'extraLCDvisibility1', 'extraLCDvisibility2', 'extraCurveVisibility1', 'extraCurveVisibility2',
         'extraDelta1', 'extraDelta2', 'extraFill1', 'extraFill2', 'channel_tare_values', 'messagehist', 'eventlabel', 'eNumberSpinBox',
@@ -1607,6 +1609,12 @@ class ApplicationWindow(QMainWindow):
         self.helpdialog:HelpDlg|None = None
 
         self.setAcceptDrops(True) # enable drag-and-drop
+
+        # ticks once a second to refresh the "since DROP" (between batch) LCD
+        self.sinceDropLCDflag:bool = False
+        self.sinceDropTimer:QTimer = QTimer()
+        self.sinceDropTimer.setInterval(1000)
+        self.sinceDropTimer.timeout.connect(self.updateSinceDropLCD)
 
         # a timer that is triggered by resizing the main window
         self.redrawTimer:QTimer = QTimer()
@@ -2724,6 +2732,11 @@ class ApplicationWindow(QMainWindow):
         self.scheduleAction.setChecked(False)
         if self.app.artisanviewerMode:
             self.scheduleAction.setEnabled(False) # no scheduler in ArtisanViewer mode
+
+        self.sinceDropAction: QAction = QAction(QApplication.translate('Menu', 'Since DROP LCD'), self)
+        self.sinceDropAction.triggered.connect(self.toggleSinceDropLCD)
+        self.sinceDropAction.setCheckable(True)
+        self.sinceDropAction.setChecked(False)
 
         self.lcdsAction: QAction = QAction(QApplication.translate('Menu', 'Main LCDs'), self)
         self.lcdsAction.setShortcut('Ctrl+L')
@@ -3931,6 +3944,27 @@ class ApplicationWindow(QMainWindow):
         self.AUCLCD.setLayout(AUCLayout)
         self.AUCLCD.hide()
 
+        # "since DROP" LCD: counts up from the last DROP until the next CHARGE (between batch time)
+        self.sinceDropLabel: QLabel = QLabel()
+        self.sinceDropLabel.setText('<small><b>' + QApplication.translate('Label', 'Since DROP') + '</b></small>')
+        self.sinceDropLcd: QLCDNumber = QLCDNumber()
+        self.sinceDropLcd.display('--:--')
+        self.sinceDropLcdFrame: QFrame = self.makePhasesLCDbox(self.sinceDropLabel, self.sinceDropLcd)
+        self.sinceDropLcd.setNumDigits(5)
+        self.sinceDropLcd.setMinimumWidth(80)
+        self.sinceDropLcdFrame.setToolTip(QApplication.translate('Tooltip', 'Time elapsed since the last DROP; resets at the next CHARGE'))
+
+        sinceDropLayout = QHBoxLayout()
+        sinceDropLayout.addSpacing(10)
+        sinceDropLayout.addWidget(self.sinceDropLcdFrame)
+        sinceDropLayout.setContentsMargins(0, 0, 0, 0)
+        sinceDropLayout.setSpacing(0)
+
+        self.sinceDropLCD: QFrame = QFrame()
+        self.sinceDropLCD.setContentsMargins(0, 0, 0, 0)
+        self.sinceDropLCD.setLayout(sinceDropLayout)
+        self.sinceDropLCD.hide()
+
 
         self.phasesLCDs: QFrame = QFrame()
         self.phasesLCDs.setContentsMargins(0, 0, 0, 0)
@@ -3960,6 +3994,7 @@ class ApplicationWindow(QMainWindow):
         self.level1layout.addWidget(self.buttonCONTROL)
         self.level1layout.addSpacing(10)
         self.level1layout.addWidget(self.lcd1)
+        self.level1layout.addWidget(self.sinceDropLCD)
         self.level1layout.setSpacing(0)
         self.level1layout.setContentsMargins(0,7,7,12) # left, top, right, bottom
 
@@ -4336,6 +4371,7 @@ class ApplicationWindow(QMainWindow):
         self.comparatorAddProfileSignal.connect(self.comparatorAddProfileSlot, type=Qt.ConnectionType.QueuedConnection)  # type: ignore[call-arg]
         self.updateScheduleSignal.connect(self.updateSchedule, type=Qt.ConnectionType.QueuedConnection)  # type: ignore[call-arg]
         self.setTimerColorSignal.connect(self.setTimerColor, type=Qt.ConnectionType.QueuedConnection)  # type: ignore[call-arg]
+        self.updateSinceDropLCDSignal.connect(self.updateSinceDropLCD, type=Qt.ConnectionType.QueuedConnection)  # type: ignore[call-arg]
 
         self.notificationManager:NotificationManager|None = None
         if not self.app.artisanviewerMode:
@@ -4492,6 +4528,7 @@ class ApplicationWindow(QMainWindow):
         if self.app.artisanviewerMode:
             self.scheduleAction.setEnabled(False) # no scheduler in ArtisanViewer mode
         view_menu.addSeparator()
+        view_menu.addAction(self.sinceDropAction)
         view_menu.addAction(self.lcdsAction)
         view_menu.addAction(self.deltalcdsAction)
         if self.ui_mode is not UI_MODE.PRODUCTION or self.qmc.Controlbuttonflag:
@@ -12019,6 +12056,39 @@ class ApplicationWindow(QMainWindow):
             self.sliderGrpBox4.setVisible(False)
             self.sliderGrpBox4.setTitle('')
 
+    @pyqtSlot(bool)
+    def toggleSinceDropLCD(self, _:bool = False) -> None:
+        self.setSinceDropLCDvisibility(not self.sinceDropLCDflag)
+
+    def setSinceDropLCDvisibility(self, visible:bool) -> None:
+        self.sinceDropLCDflag = visible
+        self.sinceDropAction.setChecked(visible)
+        if visible:
+            self.sinceDropLCD.show()
+            self.updateSinceDropLCD()
+            if not self.sinceDropTimer.isActive():
+                self.sinceDropTimer.start()
+        else:
+            self.sinceDropTimer.stop()
+            self.sinceDropLCD.hide()
+
+    @pyqtSlot()
+    def updateSinceDropLCD(self) -> None:
+        # renders the time elapsed since the last DROP as MM:SS (HH:MM after 100 minutes)
+        try:
+            last_drop = self.qmc.lastDropWallClock
+            if last_drop is None:
+                self.sinceDropLcd.display('--:--')
+            else:
+                elapsed = max(0, int(round(libtime.time() - last_drop)))
+                if elapsed < 100*60:
+                    self.sinceDropLcd.display(f'{elapsed // 60:02d}:{elapsed % 60:02d}')
+                else:
+                    # beyond 99:59 minutes we switch to HH:MM to stay within 5 digits
+                    self.sinceDropLcd.display(f'{elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}')
+        except Exception as e: # pylint: disable=broad-except
+            _log.exception(e)
+
     def hideLCDs(self, changeDefault:bool = True) -> None:
         self.lcd1.setVisible(False)
         self.lcdFrame.setVisible(False)
@@ -18536,6 +18606,7 @@ class ApplicationWindow(QMainWindow):
             self.qmc.AUClcdFlag = toBool(settings.value('AUClcdFlag',self.qmc.AUClcdFlag))
             self.qmc.AUCLCDmode = toInt(settings.value('AUCLCDmode',self.qmc.AUCLCDmode))
             self.qmc.AUCshowFlag = toBool(settings.value('AUCshowFlag',self.qmc.AUCshowFlag))
+            self.setSinceDropLCDvisibility(toBool(settings.value('sinceDropLCDflag',self.sinceDropLCDflag)))
             self.keyboardmoveflag = toInt(settings.value('keyboardmoveflag',int(self.keyboardmoveflag)))
             self.ui_mode = UI_MODE(toInt(settings.value('UI_mode',int(self.ui_mode))))
             self.set_ui_mode(self.ui_mode)
@@ -20510,6 +20581,7 @@ class ApplicationWindow(QMainWindow):
             self.settingsSetValue(settings, default_settings, 'AUClcdFlag',self.qmc.AUClcdFlag, read_defaults)
             self.settingsSetValue(settings, default_settings, 'AUCLCDmode',self.qmc.AUCLCDmode, read_defaults)
             self.settingsSetValue(settings, default_settings, 'AUCshowFlag',self.qmc.AUCshowFlag, read_defaults)
+            self.settingsSetValue(settings, default_settings, 'sinceDropLCDflag',self.sinceDropLCDflag, read_defaults)
             self.settingsSetValue(settings, default_settings, 'keyboardmoveflag',self.keyboardmoveflag, read_defaults)
 
 #--- BEGIN GROUP events

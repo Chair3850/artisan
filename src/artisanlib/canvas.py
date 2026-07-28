@@ -295,7 +295,7 @@ class tgraphcanvas(QObject):
         'DeltaETBflag', 'DeltaBTBflag', 'clearBgbeforeprofileload', 'setBatchSizeFromBackground', 'hideBgafterprofileload', 'heating_types', 'operator', 'organization', 'roastertype', 'roastersize', 'roasterheating', 'drumspeed',
         'organization_setup', 'operator_setup', 'roastertype_setup', 'roastersize_setup', 'roastersize_setup_default', 'roasterheating_setup', 'roasterheating_setup_default', 'drumspeed_setup', 'last_batchsize', 'machinesetup_energy_ratings',
         'machinesetup', 'roastingnotes', 'cuppingnotes', 'roastdate', 'roastepoch', 'roastepoch_timeout', 'lastroastepoch', 'batchcounter', 'batchsequence', 'batchprefix', 'neverUpdateBatchCounter',
-        'roastbatchnr', 'roastbatchprefix', 'roastbatchpos', 'roasttzoffset', 'roastUUID', 'scheduleID', 'scheduleDate', 'plus_default_store', 'plus_store', 'plus_store_label', 'plus_coffee',
+        'roastbatchnr', 'roastbatchprefix', 'roastbatchpos', 'roasttzoffset', 'roastUUID', 'lastDropWallClock', 'scheduleID', 'scheduleDate', 'plus_default_store', 'plus_store', 'plus_store_label', 'plus_coffee',
         'plus_coffee_label', 'plus_blend_spec', 'plus_blend_spec_labels', 'plus_blend_label', 'plus_custom_blend', 'plus_sync_record_hash', 'plus_file_last_modified', 'beans', 'ETprojectFlag', 'BTprojectFlag', 'curveVisibilityCache', 'ETcurve', 'BTcurve',
         'ETlcd', 'BTlcd', 'swaplcds', 'LCDdecimalplaces', 'foregroundShowFullflag', 'interpolateDropsflag', 'DeltaETflag', 'DeltaBTflag', 'DeltaETlcdflag', 'DeltaBTlcdflag',
         'swapdeltalcds', 'PIDbuttonflag', 'Controlbuttonflag', 'deltaETfilter', 'deltaBTfilter', 'curvefilter', 'deltaETspan', 'deltaBTspan',
@@ -1632,6 +1632,9 @@ class tgraphcanvas(QObject):
         self.roasttzoffset:int = libtime.timezone # timezone offset to be added to roastepoch to get time in local timezone; NOTE: this is not set/updated on loading a .alog profile!
         # profile UUID
         self.roastUUID:str|None = None
+        # wall clock time (libtime.time()) of the last DROP registered in this session; None if no DROP happened yet
+        # or if the timer was reset by a CHARGE. Drives the "since DROP" (between batch) LCD. Not persisted.
+        self.lastDropWallClock:float|None = None
         self.scheduleID:str|None = None
         self.scheduleDate:str|None = None # not stored on server and thus might be None while scheduleID is not None (in case scheduleID got set on server side)
 
@@ -14365,6 +14368,9 @@ class tgraphcanvas(QObject):
                         self.xaxistosm(redraw=False, set_xlim=not zoomed_in) # need to fix uneven x-axis labels like -0:13
                     elif not self.aw.buttonCHARGE.isFlat():
                         _log.debug('EVENT: CHARGE')
+                        # the next batch started: stop and clear the "since DROP" (between batch) timer
+                        self.lastDropWallClock = None
+                        self.aw.updateSinceDropLCDSignal.emit()
                         if self.device == 18 and self.aw.simulator is None: #manual mode
                             tx,et,bt = self.aw.ser.NONE()
                             if bt != 1 and et != -1:  #cancel
@@ -15117,6 +15123,9 @@ class tgraphcanvas(QObject):
                     if self.aw.buttonDROP.isFlat() and self.timeindex[6] > 0:
                         _log.debug('EVENT: undo DROP')
                         self.aw.setTimerColorSignal.emit('timer')  # reset cooling timer color back to the default
+                        # the DROP is taken back, thus also stop/clear the "since DROP" timer
+                        self.lastDropWallClock = None
+                        self.aw.updateSinceDropLCDSignal.emit()
                         self.autoDropIdx = -1 # disable autoDROP to allow manual re-DROP
                         # undo wrongly set FCs
                         # deactivate autoDROP
@@ -15142,6 +15151,9 @@ class tgraphcanvas(QObject):
                     elif not self.aw.buttonDROP.isFlat():
                         _log.debug('EVENT: DROP')
                         self.aw.setTimerColorSignal.emit('rstimer') # cooling timer color
+                        # start the "since DROP" (between batch) timer
+                        self.lastDropWallClock = libtime.time()
+                        self.aw.updateSinceDropLCDSignal.emit()
                         self.incBatchCounter()
                         # generate UUID
                         if self.roastUUID is None: # there might be already one assigned by undo and redo the markDROP!
