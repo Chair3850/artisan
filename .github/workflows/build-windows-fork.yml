@@ -1,0 +1,115 @@
+name: Build Artisan for Windows
+
+# Builds a portable Windows x64 build of Artisan on a GitHub-hosted Windows runner
+# and uploads it as a .zip artifact. No installer is produced — unzip and run
+# artisan.exe directly, which is the quickest way to test a fork.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - since-drop-timer
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+
+    env:
+      # artisan-win.spec and the upstream batch scripts refuse to run unless they
+      # believe they are on CI; this makes them take the CI code path.
+      APPVEYOR: 'True'
+      PYQT: '6'
+      PYUIC: pyuic6.exe
+
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+
+      - name: Export paths the spec expects
+        shell: pwsh
+        run: |
+          $py = Split-Path -Parent (Get-Command python).Source
+          "PYTHON_PATH=$py"                                              >> $env:GITHUB_ENV
+          "QT_TRANSL=$py\Lib\site-packages\PyQt6\Qt6\translations"       >> $env:GITHUB_ENV
+          Write-Host "PYTHON_PATH=$py"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r src\requirements.txt
+          # on Windows upstream installs pyinstaller separately (version pinned in a comment)
+          python -m pip install pyinstaller==6.21.0
+          python -c "import platform; print('building on', platform.machine())"
+
+      - name: Fetch QtLinguist (lrelease) and the VC++ redistributable
+        shell: pwsh
+        run: |
+          # build-derived-win.bat hardcodes ..\..\QtLinguist\lrelease.exe (repo root)
+          curl.exe -L -o linguist.zip https://github.com/thurask/Qt-Linguist/releases/download/20260425/linguist_6.11.0.zip
+          7z x linguist.zip -o".\QtLinguist" -y
+          if (-not (Test-Path ".\QtLinguist\lrelease.exe")) { throw "lrelease.exe missing" }
+          # artisan-win.spec copies ..\vc_redist.x64.exe into the build
+          curl.exe -L -o vc_redist.x64.exe https://aka.ms/vc14/vc_redist.x64.exe
+          if (-not (Test-Path ".\vc_redist.x64.exe")) { throw "vc_redist.x64.exe missing" }
+
+      - name: Stamp revision and OS
+        shell: pwsh
+        working-directory: src
+        run: |
+          $rev = git rev-parse --verify --short HEAD
+          (Get-Content artisanlib\__init__.py) `
+            -replace "__revision__ = '.*'", "__revision__ = '$rev'" `
+            -replace "__artisan_os__ = '.*'", "__artisan_os__ = 'Windows'" |
+            Set-Content artisanlib\__init__.py
+          $year = (Get-Date).Year
+          (Get-Content version-metadata.yml) -replace 'yyyy', "$year" | Set-Content version-metadata.yml
+          Select-String -Path artisanlib\__init__.py -Pattern "__revision__|__artisan_os__"
+
+      - name: Generate derived files (ui, translations, help)
+        shell: cmd
+        working-directory: src
+        run: call build-derived-win.bat
+
+      - name: Generate the exe version resource
+        shell: pwsh
+        working-directory: src
+        run: |
+          $version = python -c "import artisanlib; print(artisanlib.__version__)"
+          $build   = python -c "import artisanlib; print(artisanlib.__build__)"
+          create-version-file version-metadata.yml --outfile version_info-win.txt --version "$version.$build"
+          "ARTISAN_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        working-directory: src
+        run: pyinstaller --noconfirm --log-level=WARN artisan-win.spec
+
+      - name: Package as a portable zip
+        shell: pwsh
+        working-directory: src
+        run: |
+          if (-not (Test-Path "dist\artisan\artisan.exe")) { throw "artisan.exe was not produced" }
+          # the redistributable is only needed by the installer, drop it from the portable build
+          Remove-Item "dist\artisan\vc_redist.x64.exe" -ErrorAction SilentlyContinue
+          $name = "artisan-win64-$env:ARTISAN_VERSION-sincedrop.zip"
+          7z a -tzip $name .\dist\artisan\*
+          Get-Item $name | Select-Object Name, Length
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: artisan-sincedrop-win64
+          path: src\*.zip
+          if-no-files-found: error
+          retention-days: 30
